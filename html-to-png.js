@@ -15,8 +15,21 @@ class HtmlToPngConverter {
       waitUntil: 'networkidle0',
       timeout: 90000,
       splitSelector: null,
+      eventEmitter: null,
+      conversionId: null,
       ...options,
     };
+  }
+
+  /**
+   * 發送進度事件 (如果提供了 eventEmitter)
+   * @param {string} eventName - 事件名稱 (例如 'progress', 'error', 'complete')
+   * @param {object} data - 事件數據
+   */
+  _emitEvent(eventName, data) {
+    if (this.options.eventEmitter && this.options.conversionId) {
+      this.options.eventEmitter.emit(this.options.conversionId, { eventName, ...data });
+    }
   }
 
   /**
@@ -28,20 +41,27 @@ class HtmlToPngConverter {
     const absolutePath = path.resolve(htmlFilePath);
     await this._validateFileExists(absolutePath);
     
+    this._emitEvent('progress', { status: 'launching_browser', message: '正在啟動瀏覽器...' });
     const browser = await this._launchBrowser();
     try {
+      this._emitEvent('progress', { status: 'opening_page', message: '正在打開新頁面...' });
       const page = await browser.newPage();
       await page.setViewport({ width: 1080, height: 10800 });
+      this._emitEvent('progress', { status: 'navigating_to_file', message: `正在導航到文件: ${absolutePath}` });
       await page.goto(`file://${absolutePath}`, {
         waitUntil: this.options.waitUntil,
         timeout: this.options.timeout,
       });
+      this._emitEvent('progress', { status: 'capturing_screenshot', message: '正在截取屏幕...' });
       await this._captureScreenshot(page, outputPath);
-      console.log(`成功将 ${htmlFilePath} 转换为 ${outputPath}`);
+      this._emitEvent('complete', { status: 'success', message: `成功將 ${htmlFilePath} 轉換為 ${outputPath}`, outputPath });
+      console.log(`成功將 ${htmlFilePath} 转换为 ${outputPath}`);
     } catch (error) {
       console.error('转换过程中发生错误:', error);
+      this._emitEvent('error', { status: 'failed', message: '轉換過程中發生錯誤', error: error.message });
       throw error;
     } finally {
+      this._emitEvent('progress', { status: 'closing_browser', message: '正在關閉瀏覽器...' });
       await browser.close();
     }
   }
@@ -52,20 +72,27 @@ class HtmlToPngConverter {
    * @param {string} outputPath - 输出 PNG 文件路径
    */
   async convertHtmlString(htmlContent, outputPath) {
+    this._emitEvent('progress', { status: 'launching_browser', message: '正在啟動瀏覽器...' });
     const browser = await this._launchBrowser();
     try {
+      this._emitEvent('progress', { status: 'opening_page', message: '正在打開新頁面...' });
       const page = await browser.newPage();
       await page.setViewport({ width: 1920, height: 1080 });
+      this._emitEvent('progress', { status: 'setting_content', message: '正在設置 HTML 內容...' });
       await page.setContent(htmlContent, {
         waitUntil: this.options.waitUntil,
         timeout: this.options.timeout,
       });
+      this._emitEvent('progress', { status: 'capturing_screenshot', message: '正在截取屏幕...' });
       await this._captureScreenshot(page, outputPath);
+      this._emitEvent('complete', { status: 'success', message: `成功將 HTML 內容轉換為 ${outputPath}`, outputPath });
       console.log(`成功将 HTML 内容转换为 ${outputPath}`);
     } catch (error) {
       console.error('转换过程中发生错误:', error);
+      this._emitEvent('error', { status: 'failed', message: '轉換過程中發生錯誤', error: error.message });
       throw error;
     } finally {
+      this._emitEvent('progress', { status: 'closing_browser', message: '正在關閉瀏覽器...' });
       await browser.close();
     }
   }
@@ -76,20 +103,27 @@ class HtmlToPngConverter {
    * @param {string} outputPath - 输出 PNG 文件路径
    */
   async convertUrl(url, outputPath) {
+    this._emitEvent('progress', { status: 'launching_browser', message: '正在啟動瀏覽器...' });
     const browser = await this._launchBrowser();
     try {
+      this._emitEvent('progress', { status: 'opening_page', message: '正在打開新頁面...' });
       const page = await browser.newPage();
       await page.setViewport({ width: 1920, height: 1080 });
+      this._emitEvent('progress', { status: 'navigating_to_url', message: `正在導航到 URL: ${url}` });
       await page.goto(url, {
         waitUntil: this.options.waitUntil,
         timeout: this.options.timeout,
       });
+      this._emitEvent('progress', { status: 'capturing_screenshot', message: '正在截取屏幕...' });
       await this._captureScreenshot(page, outputPath);
+      this._emitEvent('complete', { status: 'success', message: `成功將 ${url} 轉換為 ${outputPath}`, outputPath });
       console.log(`成功将 ${url} 转换为 ${outputPath}`);
     } catch (error) {
       console.error('转换过程中发生错误:', error);
+      this._emitEvent('error', { status: 'failed', message: '轉換過程中發生錯誤', error: error.message });
       throw error;
     } finally {
+      this._emitEvent('progress', { status: 'closing_browser', message: '正在關閉瀏覽器...' });
       await browser.close();
     }
   }
@@ -129,6 +163,7 @@ class HtmlToPngConverter {
     const isPng = ext === '.png';
     const originalFullPageOptionFromUser = this.options.fullPage;
 
+    this._emitEvent('progress', { status: 'scroll_to_load_start', message: '開始滾動以加載完整頁面...' });
     // --- Scroll-to-load logic ---
     const initialViewportWidth = page.viewport().width;
     let previousScrollHeight = 0;
@@ -156,6 +191,7 @@ class HtmlToPngConverter {
         height: Math.max(finalScrollHeight, page.viewport()?.height || 0, 1080)
     });
     await new Promise(resolve => setTimeout(resolve, 500));
+    this._emitEvent('progress', { status: 'scroll_to_load_complete', message: `滾動加載完成。最終視口高度: ${page.viewport()?.height}` });
     console.log(`滾動加載完成。最終視口高度: ${page.viewport()?.height}`);
     // --- End of scroll-to-load logic ---
 
@@ -170,6 +206,7 @@ class HtmlToPngConverter {
 
     if (selectorForSplitting && typeof selectorForSplitting === 'string' && selectorForSplitting.trim() !== '') {
         console.log(`嘗試使用選擇器 "${selectorForSplitting}" 查找用於分割的元素...`);
+        this._emitEvent('progress', { status: 'evaluating_split_selector', message: `正在評估分割選擇器: ${selectorForSplitting}` });
         pageContainersData = await page.$$eval(selectorForSplitting, (elements) =>
             elements.map(el => {
                 const rect = el.getBoundingClientRect();
@@ -182,14 +219,18 @@ class HtmlToPngConverter {
             })
         ).catch(err => {
             console.error(`使用選擇器 "${selectorForSplitting}" 查找元素時出錯:`, err);
+            this._emitEvent('warning', { status: 'split_selector_error', message: `使用選擇器 "${selectorForSplitting}" 查找元素時出錯`, error: err.message });
             return []; // On error, return empty array, fallback to single screenshot
         });
     } else {
         console.log("未提供用於分割的選擇器，或選擇器為空。");
+        this._emitEvent('progress', { status: 'no_split_selector', message: '未提供分割選擇器，將進行單張截圖。' });
     }
 
     if (pageContainersData && pageContainersData.length > 0) {
         console.log(`找到 ${pageContainersData.length} 個元素 (基於 "${selectorForSplitting}")。將分別進行截圖。`);
+        this._emitEvent('progress', { status: 'split_screenshot_start', message: `找到 ${pageContainersData.length} 個元素，開始分割截圖。`, count: pageContainersData.length });
+        const capturedFilePaths = [];
         for (let i = 0; i < pageContainersData.length; i++) {
             const containerClip = pageContainersData[i];
             
@@ -215,15 +256,26 @@ class HtmlToPngConverter {
             }
 
             try {
+                this._emitEvent('progress', { status: 'capturing_part', message: `正在截取部分 ${i + 1}/${pageContainersData.length}...`, part: i, totalParts: pageContainersData.length, partPath });
                 await page.screenshot(screenshotOptions);
                 console.log(`成功截取部分 ${i} 到 ${partPath}`);
+                this._emitEvent('progress', { status: 'part_captured', message: `成功截取部分 ${i + 1} 到 ${partPath}`, part: i, totalParts: pageContainersData.length, partPath });
+                capturedFilePaths.push(partPath);
             } catch (clipError) {
                 console.error(`截取 .page-container 部分 ${i} 到 ${partPath} 時出錯:`, clipError);
                 console.error(`裁剪區域詳情: x=${screenshotOptions.clip.x}, y=${screenshotOptions.clip.y}, width=${screenshotOptions.clip.width}, height=${screenshotOptions.clip.height}`);
+                this._emitEvent('warning', { status: 'part_capture_error', message: `截取部分 ${i + 1} 失敗: ${partPath}`, error: clipError.message, part: i, partPath });
             }
         }
+        if (capturedFilePaths.length > 0) {
+             this._emitEvent('progress', { status: 'all_parts_processed', message: '所有部分截圖處理完成。', filePaths: capturedFilePaths});
+        } else if (pageContainersData.length > 0 && capturedFilePaths.length === 0) {
+             this._emitEvent('warning', { status: 'no_parts_captured', message: '已指定分割截圖，但沒有任何部分被成功截取。'});
+        }
+
     } else {
         console.log("未找到 .page-container 元素或查找過程中出錯。將執行單個截圖操作。");
+        this._emitEvent('progress', { status: 'single_screenshot_start', message: '開始單張截圖。' });
         // Fallback to original single screenshot logic
         const screenshotOptions = {
             path: outputPath,
@@ -242,8 +294,10 @@ class HtmlToPngConverter {
         try {
             await page.screenshot(screenshotOptions);
             console.log(`成功截取單個圖片到 ${outputPath}`);
+            this._emitEvent('progress', { status: 'single_screenshot_captured', message: `成功截取單張圖片到 ${outputPath}`, outputPath });
         } catch (singleScreenshotError) {
             console.error(`截取單個圖片到 ${outputPath} 時出錯:`, singleScreenshotError);
+            this._emitEvent('warning', { status: 'single_screenshot_error', message: `截取單張圖片失敗: ${outputPath}`, error: singleScreenshotError.message });
         }
     }
   }
