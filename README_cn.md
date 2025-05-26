@@ -1,25 +1,28 @@
-# HTML 轉 PNG/JPEG 轉換服務 (含 SSE 進度)
+# HTML 轉 PNG/JPEG 轉換服務與命令行工具
 
-一個 Node.js 服務及命令行工具，用於將 HTML 內容（來自本地文件、遠程 URL 或直接的 HTML 字符串）轉換為 PNG 或 JPEG 圖片。它使用 Puppeteer 進行瀏覽器渲染，並通過 Server-Sent Events (SSE) 提供實時進度更新，同時支持安全的 HTML 文件上傳。
+一個使用 Node.js 實現的服務和命令行工具，用於將 HTML 內容（來自本地文件、遠程 URL 或直接的 HTML 字符串）轉換為 PNG 或 JPEG 圖片，使用 Puppeteer 進行瀏覽器渲染。服務提供了實時進度更新和多種高級轉換選項。
 
-## 功能特性
+## 功能特點
 
--   **多種輸入來源：**
-    -   從本地 HTML 文件轉換 (命令行工具)。
-    -   從遠程 URL 轉換 (服務 & 命令行工具)。
-    -   從直接的 HTML 內容字符串轉換 (服務 & 命令行工具)。
-    -   安全地通過服務 API 上傳 HTML 文件進行轉換。
+-   **多種輸入源：**
+    -   從本地 HTML 文件轉換（命令行）。
+    -   從遠程 URL 轉換（服務和命令行）。
+    -   從直接的 HTML 內容字符串轉換（服務和命令行）。
+    -   安全的 HTML 文件上傳轉換（服務 API）。
+    -   **新增：** 批量處理整個目錄中的所有 HTML 文件（命令行）。
 -   **輸出選項：**
-    -   PNG 或 JPEG 格式 (由輸出文件擴展名決定)。
-    -   可配置圖片質量 (JPEG 適用)。
-    -   可選全頁截圖。
-    -   可選忽略默認白色背景 (若頁面無背景，可生成透明背景的 PNG)。
+    -   PNG 或 JPEG 格式（由輸出文件擴展名決定）。
+    -   可配置的圖片質量（對於 JPEG）。
+    -   可選的全頁截圖。
+    -   可選擇省略默認白色背景（對於需要透明背景的 PNG）。
+    -   **新增：** 智能自適應頁面尺寸，自動檢測內容實際寬度並調整視口大小，減少空白區域。
 -   **高級功能：**
-    -   基於 CSS 選擇器將單個 HTML 頁面分割截取為多張圖片。
-    -   API 用戶可通過 Server-Sent Events (SSE) 獲取實時進度更新。
--   **運行模式：**
-    -   HTTP API 服務 (`server.js`)。
-    -   命令行界面 (`html-to-png.js`)。
+    -   基於 CSS 選擇器將單個 HTML 頁面分割為多個圖片。
+    -   通過 Server-Sent Events (SSE) 為 API 用戶提供實時進度更新。
+    -   **新增：** 優化檢測固定寬度內容，避免寬視口下產生過多空白。
+-   **操作模式：**
+    -   HTTP API 服務（`server.js`）。
+    -   命令行界面（`html-to-png.js`）。
 
 ## 先決條件
 
@@ -254,7 +257,7 @@ eventSource.onerror = function(err) {
 
 ## 命令行工具 (`html-to-png.js`)
 
-`html-to-png.js` 腳本也可以直接從命令行運行，用於簡單轉換，無需 HTTP 服務。
+`html-to-png.js` 腳本可以直接從命令行運行，用於簡單的轉換操作，無需啟動 HTTP 服務。
 
 **基本用法：**
 
@@ -264,20 +267,24 @@ node html-to-png.js <command> <input_source> [options]
 
 **命令：**
 
-*   `file <input.html>`: 轉換本地 HTML 文件。
+*   `file <input.html>`: 轉換單個 HTML 文件。
     *   示例：`node html-to-png.js file ./mypage.html -o mypage_image.png`
 *   `url <URL>`: 轉換遠程網頁。
     *   示例：`node html-to-png.js url "https://example.com" -o example_snapshot.png`
 *   `html <file_containing_html.html>`: 從本地文件讀取 HTML 內容，並作為 HTML 字符串進行轉換。
     *   示例：`node html-to-png.js html ./my_raw_html.html -o raw_output.png`
+*   `folder <directory_path>`: 轉換目錄中的所有 HTML/HTM 文件。
+    *   示例：`node html-to-png.js folder ./html_files -o ./output_images`
 
 **常用選項：**
 
-*   `-o, --output <path>`: 指定輸出文件路徑。擴展名 (`.png` 或 `.jpeg`/`.jpg`) 決定格式。(默認：`output.png`)
+*   `-o, --output <path>`: 
+    - 對於 `file`/`url`/`html` 命令：指定輸出文件路徑。擴展名 (`.png` 或 `.jpeg`/`.jpg`) 決定格式。(默認：`output.png`)
+    - 對於 `folder` 命令：指定輸出目錄路徑。(默認：`output_images`)
 *   `--full-page`: 指示 Puppeteer 捕獲整個可滾動頁面。
 *   `--omit-background`: 如果頁面沒有背景色，則使背景透明 (對 PNG 有用)。
 *   `-q, --quality <number>`: 設置 JPEG 圖片的質量 (0-100 之間的整數)。
-*   `-s <CSS_selector>`: 用於將截圖分割為多個文件的 CSS 選擇器。每個匹配選擇器的元素將另存為一個獨立圖片 (例如，在基礎輸出名後附加 `_part_0.png`, `_part_1.png` 等)。
+*   `-s <CSS_selector>`: 用於將截圖分割為多個文件的 CSS 選擇器。每個匹配選擇器的元素將另存為一個獨立圖片。
 *   `-f, --format <format_string>`: 頁面格式字符串 (例如：'A4', 'Letter')。
 *   `-h, --help`: 顯示詳細的幫助信息和所有可用選項。
 
@@ -292,11 +299,18 @@ node html-to-png.js url "https://www.google.com" -o google.jpeg -q 80
 
 # 轉換本地 HTML 文件，並根據 class 為 "page-container" 的元素分割輸出
 node html-to-png.js file content.html -o content_pages.png -s ".page-container"
+
+# 處理整個目錄中的 HTML 文件
+node html-to-png.js folder ./html_files -o ./output_folder
 ```
-要獲取所有命令行選項及其描述的完整列表，請運行：
-```bash
-node html-to-png.js --help
-```
+
+**增強特性:**
+
+* **智能視口尺寸調整:** 工具會自動檢測頁面的實際內容寬度，並相應地調整視口大小，減少輸出圖片中的空白區域。特別適用於固定寬度的響應式設計頁面。
+
+* **分割截圖模式:** 使用 `-s` 選項指定 CSS 選擇器，可以將頁面分割成多個截圖，每個匹配的元素作為一個單獨的圖片。
+
+* **批量處理:** `folder` 命令使您能夠一次性處理整個目錄中的所有 HTML 文件，保留原始文件名並將結果輸出到指定目錄。
 
 ## 主要依賴項
 

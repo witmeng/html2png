@@ -1,0 +1,76 @@
+<!DOCTYPE html><html lang="zh-CN"><head>
+<meta charset="utf-8"/>
+<meta content="width=device-width, initial-scale=1.0" name="viewport"/>
+<title>亲密关系中的平衡艺术</title>
+<link href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css" rel="stylesheet"/>
+<link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0-beta3/css/all.min.css" rel="stylesheet"/>
+<script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script><style>
+        .bg-gradient {
+            background: linear-gradient(135deg, #4A90E2 0%, #9013FE 100%);
+        }
+        .shape-left {
+            background-color: rgba(245, 166, 35, 0.7);
+            clip-path: circle(30% at 25% 50%);
+        }
+        .shape-right {
+            background-color: rgba(74, 144, 226, 0.7);
+            clip-path: circle(30% at 75% 50%);
+        }
+        .shape-overlap {
+            background-color: rgba(255, 255, 255, 0.3);
+            clip-path: circle(15% at 50% 50%);
+        }
+        .shape-line {
+            height: 3px;
+            background: linear-gradient(90deg, transparent 0%, #F5A623 30%, #F5A623 70%, transparent 100%);
+        }
+        .subtitle-line {
+            height: 2px;
+            width: 80px;
+            background-color: #F5A623;
+        }
+    </style>
+</head>
+<body>
+<div class="relative w-[1280px] h-[720px] overflow-hidden bg-gray-50 font-sans">
+<!-- Background gradient -->
+<div class="absolute inset-0 bg-gradient opacity-10"></div>
+<!-- Decorative shapes representing boundaries and connections -->
+<div class="absolute inset-0 shape-left"></div>
+<div class="absolute inset-0 shape-right"></div>
+<div class="absolute inset-0 shape-overlap"></div>
+<!-- Abstract pattern representing flexibility -->
+<div class="absolute w-full top-1/4 shape-line"></div>
+<div class="absolute w-full bottom-1/4 shape-line"></div>
+<!-- Content container -->
+<div class="relative h-full flex flex-col items-center justify-center px-24">
+<!-- Title area -->
+<div class="text-center mb-12">
+<h1 class="text-6xl font-bold text-gray-800 mb-6">亲密关系的平衡艺术</h1>
+<div class="mx-auto subtitle-line mb-6"></div>
+<h2 class="text-4xl text-gray-700 mb-2">如何让自己在亲密关系中可进可退？</h2>
+<p class="text-xl text-gray-600 mt-6">掌握健康情感界限，实现关系中的自由与连接</p>
+</div>
+<!-- Icon representation of balance -->
+<div class="flex items-center justify-center space-x-16 my-12">
+<div class="text-center">
+<i class="fas fa-user text-5xl text-[#4A90E2]"></i>
+<p class="mt-3 text-lg text-gray-700">独立</p>
+</div>
+<div class="relative">
+<div class="h-[2px] w-32 bg-gray-400"></div>
+<i class="fas fa-exchange-alt text-3xl text-[#9013FE] absolute -top-3 left-1/2 transform -translate-x-1/2"></i>
+</div>
+<div class="text-center">
+<i class="fas fa-users text-5xl text-[#F5A623]"></i>
+<p class="mt-3 text-lg text-gray-700">亲密</p>
+</div>
+</div>
+<!-- Footer with date -->
+<div class="absolute bottom-12 left-0 right-0 text-center">
+<p class="text-gray-600">2025年5月</p>
+</div>
+</div>
+</div>
+
+</body></html>

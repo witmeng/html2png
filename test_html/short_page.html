@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Short Page Test</title>
+    <style>
+        body {
+            font-family: sans-serif;
+            line-height: 1.6;
+            margin: 20px;
+            background-color: #f4f4f4;
+            color: #333;
+            height: 300px; /* Explicit short height */
+            border: 2px solid #ccc;
+        }
+        .content {
+            padding: 20px;
+            background-color: white;
+            border-radius: 8px;
+        }
+    </style>
+</head>
+<body>
+    <div class="content">
+        <h1>Short Page Content</h1>
+        <p>This page has a deliberately short content height.</p>
+        <p>When screenshotting with --full-page false, the image height should be primarily based on the visible viewport or a reasonable minimum, not the full scroll height if it were longer.</p>
+    </div>
+</body>
+</html> 

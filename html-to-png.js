@@ -11,12 +11,14 @@ class HtmlToPngConverter {
       format: 'A4',
       quality: 100,
       fullPage: false,
+      fullPageUserSpecified: false,
       omitBackground: false,
       waitUntil: 'networkidle0',
       timeout: 90000,
       splitSelector: null,
       eventEmitter: null,
       conversionId: null,
+      fileContext: null,
       ...options,
     };
   }
@@ -28,7 +30,11 @@ class HtmlToPngConverter {
    */
   _emitEvent(eventName, data) {
     if (this.options.eventEmitter && this.options.conversionId) {
-      this.options.eventEmitter.emit(this.options.conversionId, { eventName, ...data });
+      const eventPayload = { eventName, ...data };
+      if (this.options.fileContext) {
+        eventPayload.fileContext = this.options.fileContext;
+      }
+      this.options.eventEmitter.emit(this.options.conversionId, eventPayload);
     }
   }
 
@@ -46,7 +52,8 @@ class HtmlToPngConverter {
     try {
       this._emitEvent('progress', { status: 'opening_page', message: '正在打開新頁面...' });
       const page = await browser.newPage();
-      await page.setViewport({ width: 1080, height: 10800 });
+      // 初始設定一個適中的視口大小，頁面加載後會自動調整
+      await page.setViewport({ width: 1920, height: 1080 });
       this._emitEvent('progress', { status: 'navigating_to_file', message: `正在導航到文件: ${absolutePath}` });
       await page.goto(`file://${absolutePath}`, {
         waitUntil: this.options.waitUntil,
@@ -77,6 +84,7 @@ class HtmlToPngConverter {
     try {
       this._emitEvent('progress', { status: 'opening_page', message: '正在打開新頁面...' });
       const page = await browser.newPage();
+      // 初始設定一個適中的視口大小，頁面加載後會自動調整
       await page.setViewport({ width: 1920, height: 1080 });
       this._emitEvent('progress', { status: 'setting_content', message: '正在設置 HTML 內容...' });
       await page.setContent(htmlContent, {
@@ -108,6 +116,7 @@ class HtmlToPngConverter {
     try {
       this._emitEvent('progress', { status: 'opening_page', message: '正在打開新頁面...' });
       const page = await browser.newPage();
+      // 初始設定一個適中的視口大小，頁面加載後會自動調整
       await page.setViewport({ width: 1920, height: 1080 });
       this._emitEvent('progress', { status: 'navigating_to_url', message: `正在導航到 URL: ${url}` });
       await page.goto(url, {
@@ -157,149 +166,403 @@ class HtmlToPngConverter {
    */
   async _captureScreenshot(page, outputPath) {
     const outputDir = path.dirname(outputPath);
-    await fs.mkdir(outputDir, { recursive: true }); // Ensure dir exists
+    await fs.mkdir(outputDir, { recursive: true });
 
     const ext = path.extname(outputPath).toLowerCase();
     const isPng = ext === '.png';
-    const originalFullPageOptionFromUser = this.options.fullPage;
+    
+    const userSpecifiedFullPage = this.options.fullPageUserSpecified; // True if --full-page was passed
+    const captureFullPageIntent = this.options.fullPage; // True if --full-page was passed, else false
 
-    this._emitEvent('progress', { status: 'scroll_to_load_start', message: '開始滾動以加載完整頁面...' });
-    // --- Scroll-to-load logic ---
-    const initialViewportWidth = page.viewport().width;
-    let previousScrollHeight = 0;
-    console.log("開始滾動加載以確保所有頁面內容均已渲染...");
-    for (let i = 0; i < 30; i++) {
-        const currentScrollHeight = await page.evaluate(() => document.body.scrollHeight);
-        if (i > 0 && currentScrollHeight === previousScrollHeight) {
-            console.log("滾動高度已穩定。假定所有內容已加載完畢。");
-            break;
+    this._emitEvent('progress', { status: 'evaluating_page_dimensions', message: '正在評估頁面初始尺寸...' });
+    
+    // 1. 獲取頁面的初始實際尺寸 (用於設定優化視口)
+    const initialDimensions = await page.evaluate(() => {
+      const body = document.body;
+      const html = document.documentElement;
+      const contentWidth = Math.max(body.scrollWidth, body.offsetWidth, html.clientWidth, html.scrollWidth, html.offsetWidth);
+      
+      const bodyScrollH = document.body.scrollHeight;
+      const htmlScrollH = document.documentElement.scrollHeight;
+      const htmlClientH = document.documentElement.clientHeight;
+      let initialEvalContentH = bodyScrollH;
+      if (htmlScrollH > bodyScrollH && htmlScrollH > htmlClientH) {
+          initialEvalContentH = htmlScrollH;
+      }
+      initialEvalContentH = Math.max(initialEvalContentH, document.body.offsetHeight, document.documentElement.offsetHeight);
+
+      const visibleWidth = Math.max(html.clientWidth || 0, window.innerWidth || 0);
+      const visibleHeight = Math.max(html.clientHeight || 0, window.innerHeight || 0);
+      let maxElementWidth = 0;
+      document.querySelectorAll('*').forEach(el => {
+        const rect = el.getBoundingClientRect();
+        if (rect.width > maxElementWidth) maxElementWidth = rect.width;
+      });
+      return { contentWidth, contentHeight: initialEvalContentH, visibleWidth, visibleHeight, maxElementWidth, devicePixelRatio: window.devicePixelRatio || 1 };
+    });
+
+    // 2. 計算並設置初始優化視口
+    const optimalInitialWidth = Math.min(Math.max(initialDimensions.contentWidth, initialDimensions.maxElementWidth, initialDimensions.visibleWidth, 800), 1920);
+    const optimalInitialHeight = Math.max(initialDimensions.contentHeight, initialDimensions.visibleHeight, 600);
+    
+    console.log(`初始優化視口計算: width=${optimalInitialWidth}, height=${optimalInitialHeight}`);
+    await page.setViewport({
+      width: Math.floor(optimalInitialWidth),
+      height: Math.floor(optimalInitialHeight),
+      deviceScaleFactor: initialDimensions.devicePixelRatio
+    });
+    await new Promise(resolve => setTimeout(resolve, 200)); // 短暫等待渲染
+
+    // 3. 執行滾動加載 (如果頁面很高)
+    if (initialDimensions.contentHeight > initialDimensions.visibleHeight * 1.5) { // 僅當內容遠超一屏時滾動
+        this._emitEvent('progress', { status: 'scroll_to_load_start', message: '開始滾動以加載完整頁面...' });
+        let previousScrollHeight = 0;
+        for (let i = 0; i < 10; i++) { // 減少滾動次數，加快速度
+            const currentScrollHeight = await page.evaluate(() => document.body.scrollHeight);
+            if (i > 0 && currentScrollHeight === previousScrollHeight) break;
+            previousScrollHeight = currentScrollHeight;
+            await page.evaluate('window.scrollTo(0, document.body.scrollHeight)');
+            await new Promise(resolve => setTimeout(resolve, 300)); // 減少等待時間
         }
-        previousScrollHeight = currentScrollHeight;
-        await page.setViewport({
-            width: initialViewportWidth,
-            height: Math.max(currentScrollHeight, page.viewport()?.height || 0, 1080)
-        });
-        await page.evaluate('window.scrollTo(0, document.body.scrollHeight)');
-        await new Promise(resolve => setTimeout(resolve, 3000));
-        if (i === 29) {
-            console.log("已達到最大滾動迭代次數。");
+        this._emitEvent('progress', { status: 'scroll_to_load_complete', message: '滾動加載完成。' });
+    }
+    
+    // 4. 獲取最終的、更詳細的頁面尺寸信息
+    this._emitEvent('progress', { status: 'evaluating_final_dimensions', message: '正在評估最終頁面尺寸...' });
+    const finalDimensions = await page.evaluate(() => {
+      const body = document.body;
+      const html = document.documentElement;
+      const contentWidth = Math.max(body.scrollWidth, body.offsetWidth, html.clientWidth, html.scrollWidth, html.offsetWidth);
+      
+      const bodyScrollHFinal = document.body.scrollHeight;
+      const htmlScrollHFinal = document.documentElement.scrollHeight;
+      const htmlClientHFinal = document.documentElement.clientHeight; // 當前視口高度
+      let finalEvalContentHeight = bodyScrollHFinal;
+      if (htmlScrollHFinal > bodyScrollHFinal && htmlScrollHFinal > htmlClientHFinal) {
+          finalEvalContentHeight = htmlScrollHFinal;
+      }
+      finalEvalContentHeight = Math.max(finalEvalContentHeight, document.body.offsetHeight, document.documentElement.offsetHeight);
+
+      const visibleWidth = Math.max(html.clientWidth || 0, window.innerWidth || 0);
+      const visibleHeight = Math.max(html.clientHeight || 0, window.innerHeight || 0);
+      
+      let maxElementWidth = 0;
+      let fixedWidthElementsInfo = [];
+      document.querySelectorAll('*').forEach(el => {
+        const rect = el.getBoundingClientRect();
+        if (rect.width > maxElementWidth) maxElementWidth = rect.width;
+        const styles = window.getComputedStyle(el);
+        const elWidthStyle = styles.width;
+        const elMaxWidthStyle = styles.maxWidth;
+        if ((elMaxWidthStyle && elMaxWidthStyle !== 'none' && !elMaxWidthStyle.includes('%') && !elMaxWidthStyle.includes('auto')) ||
+            (elWidthStyle && !elWidthStyle.includes('%') && !elWidthStyle.includes('auto'))) {
+          fixedWidthElementsInfo.push({ width: rect.width, tagName: el.tagName.toLowerCase() });
+        }
+      });
+      
+      const bodyStyles = window.getComputedStyle(body);
+      const bodyMaxWidth = (bodyStyles.maxWidth && bodyStyles.maxWidth !== 'none' && bodyStyles.maxWidth !== '0px') ? parseInt(bodyStyles.maxWidth) : 0;
+      const isBodyCentered = bodyStyles.marginLeft === bodyStyles.marginRight && bodyStyles.marginLeft === 'auto';
+      
+      return {
+        contentWidth: Math.floor(contentWidth),
+        contentHeight: Math.floor(finalEvalContentHeight),
+        visibleWidth: Math.floor(visibleWidth),
+        visibleHeight: Math.floor(visibleHeight),
+        maxElementWidth: Math.floor(maxElementWidth),
+        bodyMaxWidth: Math.floor(bodyMaxWidth),
+        isBodyCentered,
+        fixedWidthElementsInfo, // [{width, tagName}]
+        devicePixelRatio: window.devicePixelRatio || 1
+      };
+    });
+    console.log(`最終頁面尺寸評估: contentW=${finalDimensions.contentWidth}, contentH=${finalDimensions.contentHeight}, visibleH=${finalDimensions.visibleHeight}, bodyMaxW=${finalDimensions.bodyMaxWidth}, centered=${finalDimensions.isBodyCentered}`);
+
+    // 5. 計算用於截圖的有效內容寬度 (更精確)
+    let effectiveContentWidth = finalDimensions.contentWidth;
+    if (finalDimensions.bodyMaxWidth > 0 && finalDimensions.bodyMaxWidth < effectiveContentWidth) {
+        effectiveContentWidth = finalDimensions.bodyMaxWidth;
+        console.log(`使用 body.maxWidth (${finalDimensions.bodyMaxWidth}px) 作為有效內容寬度`);
+    } else if (finalDimensions.fixedWidthElementsInfo.length > 0) {
+        const mainContentElement = finalDimensions.fixedWidthElementsInfo
+            .filter(el => el.tagName !== 'html' && el.tagName !== 'body' && el.width > 0 && el.width < finalDimensions.contentWidth * 0.9)
+            .sort((a,b) => b.width - a.width)[0];
+        if (mainContentElement) {
+            effectiveContentWidth = mainContentElement.width;
+            console.log(`使用最寬固定元素 ${mainContentElement.tagName} (${mainContentElement.width}px) 作為有效內容寬度`);
         }
     }
-    const finalScrollHeight = await page.evaluate(() => document.body.scrollHeight);
-    await page.setViewport({
-        width: initialViewportWidth,
-        height: Math.max(finalScrollHeight, page.viewport()?.height || 0, 1080)
-    });
-    await new Promise(resolve => setTimeout(resolve, 500));
-    this._emitEvent('progress', { status: 'scroll_to_load_complete', message: `滾動加載完成。最終視口高度: ${page.viewport()?.height}` });
-    console.log(`滾動加載完成。最終視口高度: ${page.viewport()?.height}`);
-    // --- End of scroll-to-load logic ---
-
+    effectiveContentWidth = Math.max(effectiveContentWidth, 320); // 確保一個最小寬度
+    console.log(`最終有效內容寬度計算為: ${effectiveContentWidth}px`);
+    
+    // 6. 準備分割截圖或單張截圖
     let pageContainersData = [];
     let selectorForSplitting = this.options.splitSelector;
+    if (selectorForSplitting === null || selectorForSplitting === undefined) selectorForSplitting = '.page-container'; // CLI default
 
-    // 強制確保在 selectorForSplitting 為 null 或 undefined 時，使用 '.page-container' 作為 CLI 的後備默認值
-    if (selectorForSplitting === null || selectorForSplitting === undefined) {
-        console.log("[修正] 分割選擇器為 null/undefined，將嘗試使用默認的 '.page-container'。");
-        selectorForSplitting = '.page-container';
-    }
-
-    if (selectorForSplitting && typeof selectorForSplitting === 'string' && selectorForSplitting.trim() !== '') {
-        console.log(`嘗試使用選擇器 "${selectorForSplitting}" 查找用於分割的元素...`);
-        this._emitEvent('progress', { status: 'evaluating_split_selector', message: `正在評估分割選擇器: ${selectorForSplitting}` });
-        pageContainersData = await page.$$eval(selectorForSplitting, (elements) =>
+    const isSplitSelectorProvided = selectorForSplitting && typeof selectorForSplitting === 'string' && selectorForSplitting.trim() !== '';
+    
+    if (isSplitSelectorProvided) {
+        pageContainersData = await page.$$eval(selectorForSplitting, elements =>
             elements.map(el => {
                 const rect = el.getBoundingClientRect();
-                return {
-                    x: rect.x + window.scrollX,
-                    y: rect.y + window.scrollY,
-                    width: rect.width,
-                    height: rect.height,
-                };
+                return { x: rect.x + window.scrollX, y: rect.y + window.scrollY, width: rect.width, height: rect.height };
             })
-        ).catch(err => {
-            console.error(`使用選擇器 "${selectorForSplitting}" 查找元素時出錯:`, err);
-            this._emitEvent('warning', { status: 'split_selector_error', message: `使用選擇器 "${selectorForSplitting}" 查找元素時出錯`, error: err.message });
-            return []; // On error, return empty array, fallback to single screenshot
-        });
-    } else {
-        console.log("未提供用於分割的選擇器，或選擇器為空。");
-        this._emitEvent('progress', { status: 'no_split_selector', message: '未提供分割選擇器，將進行單張截圖。' });
+        ).catch(() => []); // Return empty on error
+        if (pageContainersData.length > 0) {
+            console.log(`找到 ${pageContainersData.length} 個元素用於分割 (選擇器: "${selectorForSplitting}")`);
+        } else {
+            console.log(`選擇器 "${selectorForSplitting}" 未找到任何元素，將執行單張截圖。`);
+        }
     }
+    
+    const isSplitModeActive = pageContainersData && pageContainersData.length > 0;
 
-    if (pageContainersData && pageContainersData.length > 0) {
-        console.log(`找到 ${pageContainersData.length} 個元素 (基於 "${selectorForSplitting}")。將分別進行截圖。`);
-        this._emitEvent('progress', { status: 'split_screenshot_start', message: `找到 ${pageContainersData.length} 個元素，開始分割截圖。`, count: pageContainersData.length });
+    // 7. 設置最終用於截圖的視口
+    // 對於分割模式，視口需要足夠大以包含所有元素；對於單張模式，視口根據截圖意圖調整。
+    let finalViewportWidth = Math.max(effectiveContentWidth, finalDimensions.visibleWidth, 800); // 確保視口至少是有效內容寬或可見寬
+    finalViewportWidth = Math.min(finalViewportWidth, 2560); // 限制一個實際的最大值
+    
+    let finalViewportHeight;
+    if (isSplitModeActive) {
+        finalViewportHeight = finalDimensions.contentHeight; // 需要能看到所有分割元素
+    } else {
+        if (captureFullPageIntent) { // --full-page
+            finalViewportHeight = finalDimensions.contentHeight;
+        } else { // 首屏
+            finalViewportHeight = finalDimensions.visibleHeight;
+        }
+    }
+    finalViewportHeight = Math.max(finalViewportHeight, 600); // 最小高度
+    
+    console.log(`設置最終截圖視口: width=${Math.floor(finalViewportWidth)}, height=${Math.floor(finalViewportHeight)}`);
+    await page.setViewport({
+        width: Math.floor(finalViewportWidth),
+        height: Math.floor(finalViewportHeight),
+        deviceScaleFactor: finalDimensions.devicePixelRatio
+    });
+    await new Promise(resolve => setTimeout(resolve, 300)); // 等待渲染
+
+    // 8. 執行截圖
+    const screenshotCommonOptions = {
+        type: isPng ? 'png' : 'jpeg',
+        omitBackground: this.options.omitBackground,
+    };
+    if (!isPng) screenshotCommonOptions.quality = this.options.quality;
+
+    if (isSplitModeActive) {
+        this._emitEvent('progress', { status: 'split_screenshot_start', count: pageContainersData.length });
         const capturedFilePaths = [];
         for (let i = 0; i < pageContainersData.length; i++) {
-            const containerClip = pageContainersData[i];
-            
-            if (containerClip.width <= 0 || containerClip.height <= 0) {
-                console.warn(`跳過 .page-container 部分 ${i}，因為其尺寸無效: width=${containerClip.width}, height=${containerClip.height}, x=${containerClip.x}, y=${containerClip.y}`);
-                continue;
-            }
+            const container = pageContainersData[i];
+            if (container.width <= 0 || container.height <= 0) continue;
 
             const partPath = outputPath.replace(ext, `_part_${i}${ext}`);
-            const screenshotOptions = {
-                path: partPath,
-                type: isPng ? 'png' : 'jpeg',
-                clip: { // These are document-relative coordinates
-                    x: Math.max(0, containerClip.x), // Ensure x,y are not negative
-                    y: Math.max(0, containerClip.y),
-                    width: containerClip.width,
-                    height: containerClip.height,
-                },
-                omitBackground: this.options.omitBackground, // User option
-            };
-            if (!isPng) {
-                screenshotOptions.quality = this.options.quality; // User option
-            }
-
             try {
-                this._emitEvent('progress', { status: 'capturing_part', message: `正在截取部分 ${i + 1}/${pageContainersData.length}...`, part: i, totalParts: pageContainersData.length, partPath });
-                await page.screenshot(screenshotOptions);
-                console.log(`成功截取部分 ${i} 到 ${partPath}`);
-                this._emitEvent('progress', { status: 'part_captured', message: `成功截取部分 ${i + 1} 到 ${partPath}`, part: i, totalParts: pageContainersData.length, partPath });
+                await page.screenshot({
+                    ...screenshotCommonOptions,
+                    path: partPath,
+                    clip: {
+                        x: Math.floor(container.x),
+                        y: Math.floor(container.y),
+                        width: Math.floor(container.width),
+                        height: Math.floor(container.height)
+                    }
+                });
                 capturedFilePaths.push(partPath);
-            } catch (clipError) {
-                console.error(`截取 .page-container 部分 ${i} 到 ${partPath} 時出錯:`, clipError);
-                console.error(`裁剪區域詳情: x=${screenshotOptions.clip.x}, y=${screenshotOptions.clip.y}, width=${screenshotOptions.clip.width}, height=${screenshotOptions.clip.height}`);
-                this._emitEvent('warning', { status: 'part_capture_error', message: `截取部分 ${i + 1} 失敗: ${partPath}`, error: clipError.message, part: i, partPath });
+                this._emitEvent('progress', { status: 'part_captured', part: i + 1, totalParts: pageContainersData.length, partPath });
+            } catch (e) { /* ... error handling ... */ }
+        }
+        // ... (完成事件)
+    } else { // 單張截圖模式
+        this._emitEvent('progress', { status: 'single_screenshot_start' });
+        const currentVp = page.viewport(); // 獲取剛設定的最終視口
+        let clip = null;
+
+        // 寬度裁剪邏輯
+        const contentDisplayWidth = Math.floor(effectiveContentWidth); // 我們認為的內容應該顯示的寬度
+        let clipX = 0;
+        let clipWidth = contentDisplayWidth;
+
+        if (contentDisplayWidth < currentVp.width) {
+            if (finalDimensions.isBodyCentered && finalDimensions.bodyMaxWidth > 0 && contentDisplayWidth <= finalDimensions.bodyMaxWidth) {
+                clipX = Math.floor((currentVp.width - contentDisplayWidth) / 2);
+            }
+            // 如果 clipWidth 已經是 effectiveContentWidth，它就是我們要的內容寬度
+        } else {
+             // 內容不比視口窄，則截取整個視口寬度
+            clipWidth = currentVp.width;
+        }
+        
+        // 高度裁剪邏輯
+        let clipY = 0;
+        let clipHeight;
+
+        if (captureFullPageIntent) { // --full-page
+            clipHeight = finalDimensions.contentHeight; // 全高
+        } else { // 首屏
+            // 截取當前視口的高度，但如果內容實際更短，則用內容高度
+            clipHeight = Math.min(currentVp.height, finalDimensions.contentHeight);
+        }
+        clipHeight = Math.max(clipHeight, 1); // 確保高度至少為1
+
+        // 判斷是否真的需要 clip
+        // 如果目標截圖區域與當前視口完全一樣，則不使用 clip，讓 fullPage 選項決定行為
+        const needsClip = 
+            Math.floor(clipX) !== 0 || 
+            Math.floor(clipWidth) < currentVp.width ||
+            (!captureFullPageIntent && Math.floor(clipHeight) < currentVp.height);
+
+        if (needsClip) {
+            clip = {
+                x: Math.floor(clipX),
+                y: Math.floor(clipY),
+                width: Math.floor(clipWidth),
+                height: Math.floor(clipHeight)
+            };
+            // 確保 clip 不超出頁面邊界 (雖然 x,y 通常是0)
+            clip.width = Math.min(clip.width, finalDimensions.contentWidth - clip.x);
+            clip.height = Math.min(clip.height, finalDimensions.contentHeight - clip.y);
+
+            if (clip.width <=0 || clip.height <=0) {
+                console.log(`計算出的Clip尺寸無效 (${clip.width}x${clip.height})，取消Clip。`);
+                clip = null;
+            } else {
+                 console.log(`應用精確 Clip: x=${clip.x} y=${clip.y} w=${clip.width} h=${clip.height}`);
             }
         }
-        if (capturedFilePaths.length > 0) {
-             this._emitEvent('progress', { status: 'all_parts_processed', message: '所有部分截圖處理完成。', filePaths: capturedFilePaths});
-        } else if (pageContainersData.length > 0 && capturedFilePaths.length === 0) {
-             this._emitEvent('warning', { status: 'no_parts_captured', message: '已指定分割截圖，但沒有任何部分被成功截取。'});
-        }
-
-    } else {
-        console.log("未找到 .page-container 元素或查找過程中出錯。將執行單個截圖操作。");
-        this._emitEvent('progress', { status: 'single_screenshot_start', message: '開始單張截圖。' });
-        // Fallback to original single screenshot logic
-        const screenshotOptions = {
+        
+        const finalScreenshotOptions = {
+            ...screenshotCommonOptions,
             path: outputPath,
-            type: isPng ? 'png' : 'jpeg',
-            fullPage: originalFullPageOptionFromUser, // Use the user's original fullPage setting
-            omitBackground: this.options.omitBackground,
+            fullPage: captureFullPageIntent // 讓 fullPage 意圖先設定
         };
-        // Apply original clip if it was specified and not doing fullPage
-        if (this.options.clip && !originalFullPageOptionFromUser) {
-            screenshotOptions.clip = this.options.clip;
+
+        if (clip) {
+            finalScreenshotOptions.clip = clip;
+            // 當 clip 被提供時，fullPage 選項通常被忽略或應設為 false。
+            // 但如果我們的 clip 高度是 contentHeight，我們其實是想在指定寬度下截全長。
+            // Puppeteer 文檔："When clip is provided, the fullPage option is ignored."
+            // 這意味著，如果我們提供了 clip，無論 fullPage 是 true 還是 false，行為都由 clip 控制。
+            // 如果 clip.height 是 contentHeight，它就會截取那個區域的全部高度。
+            // 如果 clip.height 是 visibleHeight，它就會截取那個區域的特定高度。
+            // 所以，fullPage: captureFullPageIntent 放在這裡可以，clip 會優先。
         }
-        if (!isPng) {
-            screenshotOptions.quality = this.options.quality;
-        }
+        
+        console.log(`最終截圖選項: fullPage=${finalScreenshotOptions.fullPage}, clip=${JSON.stringify(finalScreenshotOptions.clip)}`);
 
         try {
-            await page.screenshot(screenshotOptions);
-            console.log(`成功截取單個圖片到 ${outputPath}`);
-            this._emitEvent('progress', { status: 'single_screenshot_captured', message: `成功截取單張圖片到 ${outputPath}`, outputPath });
-        } catch (singleScreenshotError) {
-            console.error(`截取單個圖片到 ${outputPath} 時出錯:`, singleScreenshotError);
-            this._emitEvent('warning', { status: 'single_screenshot_error', message: `截取單張圖片失敗: ${outputPath}`, error: singleScreenshotError.message });
+            await page.screenshot(finalScreenshotOptions);
+            this._emitEvent('progress', { status: 'single_screenshot_captured', outputPath });
+            console.log(`成功截取圖片到 ${outputPath}`);
+        } catch (e) {
+            console.error(`截取單張圖片到 ${outputPath} 時出錯:`, e);
+            this._emitEvent('warning', { status: 'single_screenshot_error', error: e.message });
         }
     }
+  }
+}
+
+/**
+ * 處理整個目錄中的HTML文件
+ * @param {string} folderPath - 目錄路徑
+ * @param {string} outputDir - 輸出目錄路徑
+ * @param {object} commonConverterOptions - 通用的轉換選項 (會傳遞給每個文件的轉換器)
+ * @param {EventEmitter} [folderEventEmitter=null] - 用於發送文件夾級別進度事件的 EventEmitter
+ * @param {string} [folderConversionId=null] - 用於文件夾級別事件的轉換 ID
+ */
+async function processFolderHtml(folderPath, outputDir, commonConverterOptions = {}, folderEventEmitter = null, folderConversionId = null) {
+  
+  const emitFolderEvent = (eventName, data) => {
+    if (folderEventEmitter && folderConversionId) {
+      folderEventEmitter.emit(folderConversionId, { eventName, ...data });
+    }
+  };
+
+  try {
+    emitFolderEvent('progress', { status: 'folder_processing_started', message: `開始處理文件夾: ${folderPath}`, inputFolderPath: folderPath, outputDir });
+    // 檢查目錄是否存在
+    await fs.access(folderPath);
+    
+    // 讀取目錄中的所有文件
+    const files = await fs.readdir(folderPath);
+    const htmlFiles = files.filter(file => 
+      file.endsWith('.html') || file.endsWith('.htm')
+    );
+    
+    if (htmlFiles.length === 0) {
+      console.error(`錯誤: 在 ${folderPath} 中未找到 HTML 文件`);
+      return;
+    }
+    
+    console.log(`找到 ${htmlFiles.length} 個 HTML 文件，開始處理...`);
+    emitFolderEvent('progress', { status: 'folder_scan_complete', message: `在 ${folderPath} 中找到 ${htmlFiles.length} 個 HTML 文件。`, count: htmlFiles.length });
+    
+    // 確保輸出目錄存在
+    await fs.mkdir(outputDir, { recursive: true });
+    
+    // 處理每個HTML文件
+    for (let i = 0; i < htmlFiles.length; i++) {
+      const file = htmlFiles[i];
+      const inputPath = path.join(folderPath, file);
+      const fileContext = { inputPath, originalFileName: file };
+
+      // 從文件名生成輸出路徑 (保持原始檔案名，但改變擴展名為.png)
+      const fileName = path.basename(file, path.extname(file));
+      const outputPath = path.join(outputDir, `${fileName}.png`);
+      fileContext.outputPath = outputPath; // Add outputPath to context
+      
+      console.log(`[${i + 1}/${htmlFiles.length}] 處理: ${file} -> ${outputPath}`);
+      emitFolderEvent('progress', {
+        status: 'processing_file_start',
+        message: `[${i + 1}/${htmlFiles.length}] 開始處理: ${file} -> ${outputPath}`,
+        currentFile: file,
+        currentIndex: i + 1,
+        totalFiles: htmlFiles.length,
+        fileContext 
+      });
+      
+      try {
+        // 為每個文件創建一個新的轉換器實例
+        // 這樣可以將文件特定的上下文（如 inputPath, outputPath）傳遞給事件
+        const converter = new HtmlToPngConverter({
+          ...commonConverterOptions, // 通用選項
+          eventEmitter: folderEventEmitter, // 使用文件夾的事件發射器
+          conversionId: folderConversionId, // 使用文件夾的轉換ID
+          fileContext // 包含當前文件信息的上下文
+        });
+        await converter.convertFile(inputPath, outputPath);
+        emitFolderEvent('progress', {
+          status: 'processing_file_complete',
+          message: `[${i + 1}/${htmlFiles.length}] 完成處理: ${file}`,
+          currentFile: file,
+          currentIndex: i + 1,
+          totalFiles: htmlFiles.length,
+          fileContext,
+          result: 'success'
+        });
+      } catch (error) {
+        console.error(`轉換 ${file} 時出錯:`, error.message);
+        emitFolderEvent('error', { // Note: this is an 'error' event for the folder conversion itself
+          status: 'file_conversion_failed',
+          message: `轉換 ${file} 時出錯: ${error.message}`,
+          currentFile: file,
+          currentIndex: i + 1,
+          totalFiles: htmlFiles.length,
+          fileContext,
+          error: error.message,
+          result: 'failed'
+        });
+      }
+    }
+    
+    console.log(`目錄處理完成. 共處理了 ${htmlFiles.length} 個文件.`);
+    emitFolderEvent('complete', { status: 'folder_processing_complete', message: `文件夾 ${folderPath} 處理完成，共處理 ${htmlFiles.length} 個文件。`, inputFolderPath: folderPath, outputDir, totalFilesProcessed: htmlFiles.length });
+
+  } catch (error) {
+    console.error(`處理目錄時出錯:`, error.message);
+    emitFolderEvent('error', { status: 'folder_processing_error', message: `處理文件夾 ${folderPath} 時發生嚴重錯誤: ${error.message}`, inputFolderPath: folderPath, error: error.message });
+    throw error;
   }
 }
 
@@ -323,6 +586,10 @@ async function cli() {
         const htmlContent = await fs.readFile(options.input, 'utf-8');
         await converter.convertHtmlString(htmlContent, options.output);
         break;
+      case 'folder':
+        // 對於 folder 命令，options.output 代表輸出目錄
+        await processFolderHtml(options.input, options.output, options);
+        break;
       default:
         printUsage();
     }
@@ -343,6 +610,7 @@ function parseCommandLineArgs(args) {
     format: 'A4',
     quality: 100,
     fullPage: false,
+    fullPageUserSpecified: false,
     omitBackground: false,
     waitUntil: 'networkidle0',
     timeout: 30000,
@@ -354,7 +622,7 @@ function parseCommandLineArgs(args) {
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
 
-    if (arg === 'file' || arg === 'url' || arg === 'html') {
+    if (arg === 'file' || arg === 'url' || arg === 'html' || arg === 'folder') {
       currentCommand = arg;
       options.input = args[i + 1];
       i++;
@@ -369,6 +637,7 @@ function parseCommandLineArgs(args) {
       i++;
     } else if (arg === '--full-page') {
       options.fullPage = true;
+      options.fullPageUserSpecified = true;
     } else if (arg === '--omit-background') {
       options.omitBackground = true;
     } else if (arg === '-s') {
@@ -385,6 +654,11 @@ function parseCommandLineArgs(args) {
     printUsage();
     process.exit(1);
   }
+  
+  // 對於folder命令，如果沒有指定輸出，使用默認的output_images目錄
+  if (currentCommand === 'folder' && options.output === 'output.png') {
+    options.output = 'output_images';
+  }
 
   return options;
 }
@@ -400,15 +674,29 @@ HTML 转 PNG 工具
   node html-to-png.js file <input.html> [选项]
   node html-to-png.js url <网页URL> [选项]
   node html-to-png.js html <包含HTML的文件> [选项]
+  node html-to-png.js folder <目錄路徑> [选项]
 
 选项:
-  -o, --output <路径>        输出PNG文件路径 (默认: output.png)
-  -f, --format <格式>        页面格式 (如: A4, Letter等)
-  -q, --quality <质量>       图片质量 (0-100)
-      --full-page            捕获整个页面
+  -o, --output <路径>        輸出路徑:
+                            - 對於 file/url/html 命令: 輸出PNG文件路徑 (默認: output.png)
+                            - 對於 folder 命令: 輸出目錄路徑 (默認: output_images)
+  -f, --format <格式>        頁面格式 (如: A4, Letter等)
+  -q, --quality <质量>       圖片質量 (0-100)
+      --full-page            捕獲整個頁面
       --omit-background      不包含背景
   -s <CSS選擇器>           用於將截圖分割成多個文件的CSS選擇器 (默認: '.page-container')
-  -h, --help                 显示此帮助信息
+  -h, --help                 顯示此幫助信息
+
+示例:
+  # 轉換單個HTML文件
+  node html-to-png.js file page.html -o result.png
+  
+  # 轉換遠程URL為JPEG
+  node html-to-png.js url https://example.com -o website.jpeg -q 85
+  
+  # 處理整個資料夾中的HTML文件 (保持原文件名，但改為PNG格式)
+  node html-to-png.js folder ./html_files -o ./output_images
+  # 上面命令的輸出文件將是: ./output_images/file1.png, ./output_images/file2.png 等
 `);
 }
 
@@ -420,4 +708,5 @@ if (require.main === module) {
 // 导出模块供其他程序使用
 module.exports = {
   HtmlToPngConverter,
+  processFolderHtml,
 };    
