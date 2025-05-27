@@ -1,23 +1,37 @@
 {
-  "name": "html2png-service",
-  "version": "1.0.0",
-  "description": "HTML to PNG conversion service with Puppeteer and Express, supporting SSE for progress updates.",
-  "main": "server.js",
+  "name": "html2png-mcp",
+  "version": "2.0.14",
+  "description": "MCP server for HTML to PNG conversion using Puppeteer.",
+  "type": "module",
+  "main": "dist/html-to-png.js",
+  "bin": {
+    "html2png-mcp": "dist/mcp-stdio-server.js"
+  },
+  "files": [
+    "dist"
+  ],
   "scripts": {
-    "start": "node server.js",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "build": "npm version patch --no-git-tag-version && tsc",
+    "start": "node dist/mcp-stdio-server.js",
+    "lint": "eslint src/**/*.ts --fix",
+    "format": "prettier --write src/**/*.ts"
   },
   "dependencies": {
-    "express": "^4.19.2",
-    "multer": "^1.4.5-lts.1",
-    "puppeteer": "^24.9.0"
+    "@modelcontextprotocol/sdk": "^1.12.0",
+    "puppeteer": "^24.9.0",
+    "express": "^4.18.0",
+    "multer": "^1.4.5-lts.1"
   },
-  "keywords": [
-    "html2png",
-    "puppeteer",
-    "express",
-    "sse"
-  ],
-  "author": "witmeng",
-  "license": "ISC"
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/puppeteer": "^7.0.4",
+    "@typescript-eslint/eslint-plugin": "^7.0.0",
+    "@typescript-eslint/parser": "^7.0.0",
+    "eslint": "^8.0.0",
+    "eslint-config-prettier": "^9.0.0",
+    "eslint-plugin-prettier": "^5.0.0",
+    "prettier": "^3.0.0",
+    "ts-node": "^10.9.0",
+    "typescript": "^5.0.0"
+  }
 }

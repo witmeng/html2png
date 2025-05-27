@@ -103,3 +103,6 @@ output_images/
 # Specific to this project if any other temp or build files
 # e.g., if you have a /dist folder for bundled assets
 # dist/ 
+
+context7/
+typescript-sdk/
