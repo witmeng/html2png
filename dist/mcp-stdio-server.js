@@ -1,4 +1,31 @@
 #!/usr/bin/env node
+/**
+ * html2png-mcp-server
+ *
+ * 這是一個基於 MCP (Model Context Protocol) 標準的 Stdio Server，
+ * 使用 @modelcontextprotocol/sdk (typescript-sdk) 實現，
+ * 主要用途為將 HTML、網址、檔案內容（base64）轉換為 PNG 圖片。
+ *
+ * 支持的 input 類型：
+ *   - type: 'url'    // 支持分號分隔的多個網址，批次轉換
+ *   - type: 'html'   // 直接傳入 HTML 字串
+ *   - type: 'base64' // 以 base64 編碼的檔案內容（如 HTML 檔案），client 需先將檔案內容 base64 encode 後傳給 server
+ *
+ * 主要功能：
+ *   - 批次處理多個網址
+ *   - 支持 base64 檔案內容上傳與轉換
+ *   - 轉換結果以陣列形式回傳所有生成的 PNG 路徑與檔名
+ *   - 支持進度通知與詳細日誌
+ *
+ * 技術棧：
+ *   - MCP 協議 server 實現：typescript-sdk (McpServer, StdioServerTransport)
+ *   - Schema 驗證：zod
+ *   - 圖片轉換：HtmlToPngConverter
+ *
+ * 適用於 LLM 應用、批次自動化、AI Agent 等場景。
+ *
+ * 詳細協議與 SDK 說明請參考 typescript-sdk/README.md
+ */
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
@@ -49,19 +76,17 @@ const ConvertInputOptionsSchema = z.object({
     splitSelector: z.string().nullable().optional(),
 }).strict();
 const ConvertInputSchema = z.object({
-    type: z.enum(['url', 'html', 'file_content']), // 'file' is changed to 'file_content'
-    input: z.string(), // URL string or HTML content string or File content string (as base64 or plain text)
-    // For file_content, client should specify if input is base64 and its original extension for correct processing if needed.
-    // We might add 'encoding' (e.g., 'base64') and 'originalFileName' fields later if 'file_content' needs more metadata.
-    outputFileName: z.string().optional().describe("Desired output file name, e.g., 'page.png'. If not provided, a name will be generated."),
+    type: z.enum(['url', 'html', 'base64']),
+    input: z.string().describe("網址、HTML內容或 base64 編碼的檔案內容"),
+    originalFileName: z.string().optional().describe("原始檔案名稱，僅 type 為 base64 時建議提供"),
+    encoding: z.literal('base64').optional().describe("檔案內容的編碼格式，僅 type 為 base64 時使用，預設為 base64"),
+    outputFileName: z.string().optional().describe("期望輸出的檔名，例如 'page.png'。若未提供則自動生成。"),
     options: ConvertInputOptionsSchema.optional(),
 }).strict();
 const ConvertOutputSchema = z.object({
-    outputPath: z.string().describe("The path on the server where the PNG was saved."),
-    // Consider adding imageData: z.string().optional().describe("Base64 encoded PNG data if direct return is desired.")
-    // For now, we'll stick to outputPath as the primary result.
-    fileName: z.string().describe("The actual name of the file created."),
-    logs: z.array(z.string()).optional().describe("Conversion logs or messages."),
+    outputPaths: z.array(z.string()).describe("所有生成的 PNG 路徑"),
+    fileNames: z.array(z.string()).describe("所有生成的檔名"),
+    logs: z.array(z.string()).optional().describe("轉換日誌"),
 }).strict();
 // 3. Define the Tool Callback function
 const convertToolCallback = async (args, extra) => {
@@ -115,52 +140,90 @@ const convertToolCallback = async (args, extra) => {
         sendProgress('processing_started', `Starting conversion for type: ${type}`);
         switch (type) {
             case 'url':
-                logs.push(`Converting URL: ${input}`);
-                await converter.convertUrl(input, outputPath);
-                break;
+                // 支持分號分隔的多個網址
+                const urls = input.split(';').map(u => u.trim()).filter(Boolean);
+                var outputPaths = [];
+                var fileNames = [];
+                for (let i = 0; i < urls.length; i++) {
+                    const url = urls[i];
+                    const fileName = urls.length === 1
+                        ? actualOutputFileName
+                        : `${path.basename(actualOutputFileName, '.png')}_${i + 1}.png`;
+                    const outPath = path.join(outputBaseDir, fileName);
+                    logs.push(`Converting URL: ${url}`);
+                    await converter.convertUrl(url, outPath);
+                    outputPaths.push(outPath);
+                    fileNames.push(fileName);
+                }
+                sendProgress('processing_complete', `Conversion successful: ${outputPaths.join(', ')}`);
+                logs.push(`Conversion successful. Output: ${outputPaths.join(', ')}`);
+                return {
+                    content: [{ type: 'text', text: `Conversion successful. Output: ${outputPaths.join(', ')}` }],
+                    structuredContent: {
+                        outputPaths,
+                        fileNames,
+                        logs,
+                    },
+                };
             case 'html':
                 logs.push(`Converting HTML string (length: ${input.length})`);
                 await converter.convertHtmlString(input, outputPath);
-                break;
-            case 'file_content':
-                // For file_content, we assume 'input' is the HTML string itself.
-                // If it were base64, client would need to decode or server would decode here.
-                // For simplicity, assuming plain text HTML content.
-                // A temporary file might be needed if convertFile expects a path.
-                const tempHtmlPath = path.join(outputBaseDir, `temp_${conversionJobId}.html`);
-                await fs.writeFile(tempHtmlPath, input, 'utf-8');
-                logs.push(`Converting file content (saved to temp: ${tempHtmlPath})`);
-                await converter.convertFile(tempHtmlPath, outputPath);
-                await fs.unlink(tempHtmlPath).catch((e) => console.error("Failed to delete temp HTML file:", e));
-                break;
+                outputPaths = [outputPath];
+                fileNames = [actualOutputFileName];
+                sendProgress('processing_complete', `Conversion successful: ${outputPath}`);
+                logs.push(`Conversion successful. Output: ${outputPath}`);
+                return {
+                    content: [{ type: 'text', text: `Conversion successful. Output: ${outputPath}` }],
+                    structuredContent: {
+                        outputPaths,
+                        fileNames,
+                        logs,
+                    },
+                };
+            case 'base64':
+                // 當 `type: 'base64'` 時，將 `input` 解碼寫入臨時檔案，再進行轉換
+                const tempFilePath = path.join(outputBaseDir, `temp_${conversionJobId}.base64`);
+                await fs.writeFile(tempFilePath, input, 'utf-8');
+                logs.push(`Converting base64 content (saved to temp: ${tempFilePath})`);
+                await converter.convertFile(tempFilePath, outputPath);
+                await fs.unlink(tempFilePath).catch((e) => console.error("Failed to delete temp base64 file:", e));
+                outputPaths = [outputPath];
+                fileNames = [actualOutputFileName];
+                sendProgress('processing_complete', `Conversion successful: ${outputPath}`);
+                logs.push(`Conversion successful. Output: ${outputPath}`);
+                return {
+                    content: [{ type: 'text', text: `Conversion successful. Output: ${outputPath}` }],
+                    structuredContent: {
+                        outputPaths,
+                        fileNames,
+                        logs,
+                    },
+                };
             default:
-                // This case should ideally be prevented by Zod validation if enum is exhaustive
                 sendProgress('error', `Invalid conversion type: ${type}`);
-                // Ensure McpError is thrown, not just a generic Error.
                 throw new McpError(ErrorCode.InvalidParams, `Invalid conversion type: ${type}`);
         }
-        sendProgress('processing_complete', `Conversion successful: ${outputPath}`);
-        logs.push(`Conversion successful. Output: ${outputPath}`);
-        return {
-            content: [{ type: 'text', text: `Conversion successful. Output: ${outputPath}` }],
-            structuredContent: {
-                outputPath,
-                fileName: actualOutputFileName,
-                logs,
-            },
-        };
     }
     catch (error) {
         console.error(`[${conversionJobId}] Conversion error:`, error);
         const errorMessage = error instanceof Error ? error.message : 'An unknown error occurred';
         sendProgress('error', `Conversion failed: ${errorMessage}`, { error: String(error) });
         logs.push(`Error during conversion: ${errorMessage}`);
+        // 準確回傳錯誤到 MCP client
+        const errorContent = [{ type: 'text', text: `[ERROR] Conversion failed: ${errorMessage}` }];
+        const errorStructuredContent = {
+            outputPaths: [],
+            fileNames: [],
+            logs,
+            error: String(error),
+        };
         if (error instanceof McpError) {
-            throw error;
+            // 仍然 throw，但也回傳 errorContent 方便 client 記錄
+            throw new McpError(error.code, error.message, { ...errorStructuredContent });
         }
         // Construct a new McpError, including the original error if it was an Error instance
         const errorDetails = error instanceof Error ? { originalError: error.toString() } : {};
-        throw new McpError(ErrorCode.InternalError, `Conversion failed: ${errorMessage}`, { logs, ...errorDetails });
+        throw new McpError(ErrorCode.InternalError, `Conversion failed: ${errorMessage}`, { ...errorStructuredContent, ...errorDetails });
     }
 };
 // 4. Initialize McpServer and StdioServerTransport
@@ -174,10 +237,10 @@ const mcpServer = new McpServer(serverInfo, {
 });
 // 5. Register the tool
 mcpServer.registerTool('html2png/convert', {
-    description: 'Converts HTML, URL, or HTML file content to a PNG image.',
+    description: 'Converts HTML, URL, or base64 file content to a PNG image.\n\n說明：\n- 當 type 為 html 時，input 必須是 HTML 原始碼字串（不能是檔案路徑）。\n- 當 type 為 base64 時，input 必須是 base64 編碼的檔案內容。\n- 當 type 為 url 時，input 為網址（可分號分隔多個網址）。',
     inputSchema: ConvertInputSchema.shape,
     outputSchema: ConvertOutputSchema.shape,
-    annotations: { 稳定性: '實驗性' },
+    annotations: { 穩定性: '實驗性' },
 }, convertToolCallback);
 // 6. Main function to start the server
 async function main() {
@@ -185,13 +248,19 @@ async function main() {
         const transport = new StdioServerTransport();
         await mcpServer.connect(transport);
         console.log('MCP Stdio Server connected to stdio and listening for messages.');
-        // Keep the process alive until the transport is closed (e.g., by client disconnecting stdin)
-        // transport.onclose will be called by StdioServerTransport when stdin ends.
+        // 防止重複關閉導致遞迴
+        let isClosing = false;
         transport.onclose = () => {
+            if (isClosing)
+                return;
+            isClosing = true;
             console.log("Stdio transport closed. Exiting.");
             mcpServer.close().finally(() => process.exit(0));
         };
         transport.onerror = (err) => {
+            if (isClosing)
+                return;
+            isClosing = true;
             console.error("Stdio transport error:", err);
             mcpServer.close().finally(() => process.exit(1));
         };

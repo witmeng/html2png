@@ -1,6 +1,6 @@
 {
   "name": "html2png-mcp",
-  "version": "2.0.14",
+  "version": "2.0.43",
   "description": "MCP server for HTML to PNG conversion using Puppeteer.",
   "type": "module",
   "main": "dist/html-to-png.js",
