@@ -35,19 +35,28 @@ export declare class HtmlToPngConverter {
      * @param htmlFilePath - HTML 文件路径
      * @param outputPath - 输出 PNG 文件路径
      */
-    convertFile(htmlFilePath: string, outputPath: string): Promise<void>;
+    convertFile(htmlFilePath: string, outputPath: string): Promise<{
+        localPaths: string[];
+        ossUrls: string[];
+    }>;
     /**
      * 将 HTML 字符串转换为 PNG
      * @param htmlContent - HTML 内容
      * @param outputPath - 输出 PNG 文件路径
      */
-    convertHtmlString(htmlContent: string, outputPath: string): Promise<void>;
+    convertHtmlString(htmlContent: string, outputPath: string): Promise<{
+        localPaths: string[];
+        ossUrls: string[];
+    }>;
     /**
      * 转换在线网页为 PNG
      * @param url - 网页 URL
      * @param outputPath - 输出 PNG 文件路径
      */
-    convertUrl(url: string, outputPath: string): Promise<void>;
+    convertUrl(url: string, outputPath: string): Promise<{
+        localPaths: string[];
+        ossUrls: string[];
+    }>;
     private _validateFileExists;
     private _launchBrowser;
     private _captureScreenshot;

@@ -2,6 +2,8 @@ import puppeteer, { type Page, type Browser, type ScreenshotOptions, type Puppet
 import fs from 'fs/promises';
 import path from 'path';
 import { EventEmitter } from 'events';
+import OSS from 'ali-oss';
+import { mcpLog } from './log.js';
 
 // --- Interfaces and Types ---
 
@@ -49,6 +51,93 @@ interface SplitElementData {
 //   output: string; // For folder command, this is outputDir
 // }
 
+let ossClient: any = null;
+let ossAvailable = true;
+
+// ali-oss 初始化時，檢查並在oss /html2png 目錄
+
+
+function getOssEndpoint(): string | undefined {
+  // 僅當 ALI_OSS_ENDPOINT 未設置時才自動推導
+  if (process.env.ALI_OSS_ENDPOINT) {
+    mcpLog('info', `[OSS] 使用顯式設置的 endpoint: ${process.env.ALI_OSS_ENDPOINT}`);
+    return process.env.ALI_OSS_ENDPOINT;
+  }
+  let baseUrl = process.env.OSS_EXPECTED_BASE_URL;
+  if (baseUrl) {
+    if (!/^https?:\/\//.test(baseUrl)) {
+      baseUrl = 'https://' + baseUrl;
+    }
+    try {
+      const url = new URL(baseUrl);
+      mcpLog('info', `[OSS] 從 OSS_EXPECTED_BASE_URL 自動推導 endpoint: ${url.host}`);
+      return url.host;
+    } catch (e) {
+      mcpLog('error', `[OSS] 解析 OSS_EXPECTED_BASE_URL 失敗: ${e}`);
+    }
+  }
+  return undefined;
+}
+
+try {
+  ossClient = new OSS({
+    region: process.env.ALI_OSS_REGION!,
+    accessKeyId: process.env.ALI_OSS_KEY!,
+    accessKeySecret: process.env.ALI_OSS_SECRET!,
+    bucket: process.env.ALI_OSS_BUCKET!,
+    endpoint: getOssEndpoint()!,
+  });
+  mcpLog('info', '[OSS] ali-oss 初始化成功');
+  mcpLog('info', `[OSS ENV] ALI_OSS_REGION: ${process.env.ALI_OSS_REGION}`);
+  mcpLog('info', `[OSS ENV] ALI_OSS_KEY: ${process.env.ALI_OSS_KEY}`);
+  mcpLog('info', `[OSS ENV] ALI_OSS_SECRET: ${process.env.ALI_OSS_SECRET ? '***' : undefined}`);
+  mcpLog('info', `[OSS ENV] ALI_OSS_BUCKET: ${process.env.ALI_OSS_BUCKET}`);
+  mcpLog('info', `[OSS ENV] ALI_OSS_ENDPOINT: ${process.env.ALI_OSS_ENDPOINT}`);
+  mcpLog('info', `[OSS ENV] OSS_EXPECTED_BASE_URL: ${process.env.OSS_EXPECTED_BASE_URL}`);
+  // 初始化 OSS 目錄
+  (async () => {
+    try {
+      await ossClient.put('html2png/', Buffer.from(''));
+      mcpLog('info', '[OSS] 已在 OSS 上建立 html2png 目錄');
+    } catch (e) {
+      mcpLog('error', `[OSS] 建立 html2png 目錄失敗: ${e}`);
+    }
+  })();
+} catch (e: any) {
+  ossAvailable = false;
+  mcpLog('error', `[OSS] ali-oss 初始化失敗: ${e?.message || e}`);
+}
+const ossExpectedBaseUrl = process.env.OSS_EXPECTED_BASE_URL;
+
+function getOssRemotePath(localPath: string): string {
+  const now = new Date();
+  const yyyy = now.getFullYear();
+  const mm = String(now.getMonth() + 1).padStart(2, '0');
+  const dd = String(now.getDate()).padStart(2, '0');
+  const dateDir = `${yyyy}${mm}${dd}`;
+  return `html2png/${dateDir}/${path.basename(localPath)}`;
+}
+
+async function uploadToOss(localPath: string, remotePath?: string): Promise<string> {
+  if (!ossAvailable || !ossClient) {
+    mcpLog('info', '[OSS] OSS 未初始化，跳過上傳');
+    return '';
+  }
+  // 上傳前檢查檔案存在
+  try {
+    await fs.access(localPath);
+  } catch (e) {
+    mcpLog('error', `[OSS] 檔案不存在，無法上傳: ${localPath}`);
+    throw new Error(`[OSS] 檔案不存在，無法上傳: ${localPath}`);
+  }
+  const ossPath = remotePath || getOssRemotePath(localPath);
+  const result = await ossClient.put(ossPath, localPath);
+  if (ossExpectedBaseUrl) {
+    const base = ossExpectedBaseUrl.replace(/\/+$/, '');
+    return `${base}/${ossPath}`;
+  }
+  return result.url;
+}
 
 /**
  * HTML 转 PNG 工具类
@@ -93,12 +182,13 @@ export class HtmlToPngConverter {
    * @param htmlFilePath - HTML 文件路径
    * @param outputPath - 输出 PNG 文件路径
    */
-  async convertFile(htmlFilePath: string, outputPath: string): Promise<void> {
+  async convertFile(htmlFilePath: string, outputPath: string): Promise<{ localPaths: string[], ossUrls: string[] }> {
     const absolutePath = path.resolve(htmlFilePath);
     await this._validateFileExists(absolutePath);
-    
     this._emitEvent('progress', { status: 'launching_browser', message: '正在啟動瀏覽器...' });
     const browser = await this._launchBrowser();
+    const localPaths: string[] = [];
+    const ossUrls: string[] = [];
     try {
       this._emitEvent('progress', { status: 'opening_page', message: '正在打開新頁面...' });
       const page = await browser.newPage();
@@ -110,10 +200,37 @@ export class HtmlToPngConverter {
       });
       this._emitEvent('progress', { status: 'capturing_screenshot', message: '正在截取屏幕...' });
       await this._captureScreenshot(page, outputPath);
-      this._emitEvent('complete', { status: 'success', message: `成功將 ${htmlFilePath} 轉換為 ${outputPath}`, outputPath });
-      console.log(`成功將 ${htmlFilePath} 转换为 ${outputPath}`);
+      localPaths.push(outputPath);
+      // 新增：如果有分割，localPaths 會有多個檔案
+      // 檢查是否有分割檔案
+      const ext = path.extname(outputPath);
+      const base = outputPath.replace(ext, '');
+      let partIndex = 0;
+      while (true) {
+        const partPath = `${base}_part_${partIndex}${ext}`;
+        try {
+          await fs.access(partPath);
+          if (!localPaths.includes(partPath)) localPaths.push(partPath);
+          partIndex++;
+        } catch {
+          break;
+        }
+      }
+      // 上傳所有 localPaths
+      for (const filePath of localPaths) {
+        try {
+          const ossUrl = await uploadToOss(filePath);
+          if (ossUrl) ossUrls.push(ossUrl);
+        } catch (e) {
+          mcpLog('error', `[OSS] 上傳失敗: ${filePath}，錯誤: ${e}`);
+        }
+      }
+      this._emitEvent('complete', { status: 'success', message: `成功將 ${htmlFilePath} 轉換為 ${outputPath}`, outputPath, ossUrls });
+      mcpLog('info', `成功將 ${htmlFilePath} 轉換為 ${outputPath}`);
+      return { localPaths, ossUrls };
     } catch (error: any) {
-      console.error('转换过程中发生错误:', error);
+      mcpLog('error', '轉換過程中發生錯誤: ' + error);
+      if (error && error.stack) mcpLog('error', error.stack);
       this._emitEvent('error', { status: 'failed', message: '轉換過程中發生錯誤', error: error.message });
       throw error;
     } finally {
@@ -127,9 +244,11 @@ export class HtmlToPngConverter {
    * @param htmlContent - HTML 内容
    * @param outputPath - 输出 PNG 文件路径
    */
-  async convertHtmlString(htmlContent: string, outputPath: string): Promise<void> {
+  async convertHtmlString(htmlContent: string, outputPath: string): Promise<{ localPaths: string[], ossUrls: string[] }> {
     this._emitEvent('progress', { status: 'launching_browser', message: '正在啟動瀏覽器...' });
     const browser = await this._launchBrowser();
+    const localPaths: string[] = [];
+    const ossUrls: string[] = [];
     try {
       this._emitEvent('progress', { status: 'opening_page', message: '正在打開新頁面...' });
       const page = await browser.newPage();
@@ -141,10 +260,36 @@ export class HtmlToPngConverter {
       });
       this._emitEvent('progress', { status: 'capturing_screenshot', message: '正在截取屏幕...' });
       await this._captureScreenshot(page, outputPath);
-      this._emitEvent('complete', { status: 'success', message: `成功將 HTML 內容轉換為 ${outputPath}`, outputPath });
-      console.log(`成功将 HTML 内容转换为 ${outputPath}`);
+      localPaths.push(outputPath);
+      // 新增：如果有分割，localPaths 會有多個檔案
+      const ext = path.extname(outputPath);
+      const base = outputPath.replace(ext, '');
+      let partIndex = 0;
+      while (true) {
+        const partPath = `${base}_part_${partIndex}${ext}`;
+        try {
+          await fs.access(partPath);
+          if (!localPaths.includes(partPath)) localPaths.push(partPath);
+          partIndex++;
+        } catch {
+          break;
+        }
+      }
+      // 上傳所有 localPaths
+      for (const filePath of localPaths) {
+        try {
+          const ossUrl = await uploadToOss(filePath);
+          if (ossUrl) ossUrls.push(ossUrl);
+        } catch (e) {
+          mcpLog('error', `[OSS] 上傳失敗: ${filePath}，錯誤: ${e}`);
+        }
+      }
+      this._emitEvent('complete', { status: 'success', message: `成功將 HTML 內容轉換為 ${outputPath}`, outputPath, ossUrls });
+      mcpLog('info', `成功將 HTML 內容轉換為 ${outputPath}`);
+      return { localPaths, ossUrls };
     } catch (error: any) {
-      console.error('转换过程中发生错误:', error);
+      mcpLog('error', '轉換過程中發生錯誤: ' + error);
+      if (error && error.stack) mcpLog('error', error.stack);
       this._emitEvent('error', { status: 'failed', message: '轉換過程中發生錯誤', error: error.message });
       throw error;
     } finally {
@@ -158,9 +303,11 @@ export class HtmlToPngConverter {
    * @param url - 网页 URL
    * @param outputPath - 输出 PNG 文件路径
    */
-  async convertUrl(url: string, outputPath: string): Promise<void> {
+  async convertUrl(url: string, outputPath: string): Promise<{ localPaths: string[], ossUrls: string[] }> {
     this._emitEvent('progress', { status: 'launching_browser', message: '正在啟動瀏覽器...' });
     const browser = await this._launchBrowser();
+    const localPaths: string[] = [];
+    const ossUrls: string[] = [];
     try {
       this._emitEvent('progress', { status: 'opening_page', message: '正在打開新頁面...' });
       const page = await browser.newPage();
@@ -172,10 +319,36 @@ export class HtmlToPngConverter {
       });
       this._emitEvent('progress', { status: 'capturing_screenshot', message: '正在截取屏幕...' });
       await this._captureScreenshot(page, outputPath);
-      this._emitEvent('complete', { status: 'success', message: `成功將 ${url} 轉換為 ${outputPath}`, outputPath });
-      console.log(`成功将 ${url} 转换为 ${outputPath}`);
+      localPaths.push(outputPath);
+      // 新增：如果有分割，localPaths 會有多個檔案
+      const ext = path.extname(outputPath);
+      const base = outputPath.replace(ext, '');
+      let partIndex = 0;
+      while (true) {
+        const partPath = `${base}_part_${partIndex}${ext}`;
+        try {
+          await fs.access(partPath);
+          if (!localPaths.includes(partPath)) localPaths.push(partPath);
+          partIndex++;
+        } catch {
+          break;
+        }
+      }
+      // 上傳所有 localPaths
+      for (const filePath of localPaths) {
+        try {
+          const ossUrl = await uploadToOss(filePath);
+          if (ossUrl) ossUrls.push(ossUrl);
+        } catch (e) {
+          mcpLog('error', `[OSS] 上傳失敗: ${filePath}，錯誤: ${e}`);
+        }
+      }
+      this._emitEvent('complete', { status: 'success', message: `成功將 ${url} 轉換為 ${outputPath}`, outputPath, ossUrls });
+      mcpLog('info', `成功將 ${url} 轉換為 ${outputPath}`);
+      return { localPaths, ossUrls };
     } catch (error: any) {
-      console.error('转换过程中发生错误:', error);
+      mcpLog('error', '轉換過程中發生錯誤: ' + error);
+      if (error && error.stack) mcpLog('error', error.stack);
       this._emitEvent('error', { status: 'failed', message: '轉換過程中發生錯誤', error: error.message });
       throw error;
     } finally {
@@ -238,7 +411,7 @@ export class HtmlToPngConverter {
     const optimalInitialWidth = Math.min(Math.max(initialDimensions.contentWidth, initialDimensions.maxElementWidth || 0, initialDimensions.visibleWidth, 800), 1920);
     const optimalInitialHeight = Math.max(initialDimensions.contentHeight, initialDimensions.visibleHeight, 600);
     
-    console.log(`初始優化視口計算: width=${optimalInitialWidth}, height=${optimalInitialHeight}`);
+    mcpLog('info', `初始優化視口計算: width=${optimalInitialWidth}, height=${optimalInitialHeight}`);
     await page.setViewport({
       width: Math.floor(optimalInitialWidth),
       height: Math.floor(optimalInitialHeight),
@@ -307,23 +480,23 @@ export class HtmlToPngConverter {
         devicePixelRatio: window.devicePixelRatio || 1
       };
     });
-    console.log(`最終頁面尺寸評估: contentW=${finalDimensions.contentWidth}, contentH=${finalDimensions.contentHeight}, visibleH=${finalDimensions.visibleHeight}, bodyMaxW=${finalDimensions.bodyMaxWidth}, centered=${finalDimensions.isBodyCentered}`);
+    mcpLog('info', `最終頁面尺寸評估: contentW=${finalDimensions.contentWidth}, contentH=${finalDimensions.contentHeight}, visibleH=${finalDimensions.visibleHeight}, bodyMaxW=${finalDimensions.bodyMaxWidth}, centered=${finalDimensions.isBodyCentered}`);
 
     let effectiveContentWidth = finalDimensions.contentWidth;
     if (finalDimensions.bodyMaxWidth && finalDimensions.bodyMaxWidth > 0 && finalDimensions.bodyMaxWidth < effectiveContentWidth) {
         effectiveContentWidth = finalDimensions.bodyMaxWidth;
-        console.log(`使用 body.maxWidth (${finalDimensions.bodyMaxWidth}px) 作為有效內容寬度`);
+        mcpLog('info', `使用 body.maxWidth (${finalDimensions.bodyMaxWidth}px) 作為有效內容寬度`);
     } else if (finalDimensions.fixedWidthElementsInfo && finalDimensions.fixedWidthElementsInfo.length > 0) {
         const mainContentElement = finalDimensions.fixedWidthElementsInfo
             .filter(el => el.tagName !== 'html' && el.tagName !== 'body' && el.width > 0 && el.width < finalDimensions.contentWidth * 0.9)
             .sort((a,b) => b.width - a.width)[0];
         if (mainContentElement) {
             effectiveContentWidth = mainContentElement.width;
-            console.log(`使用最寬固定元素 ${mainContentElement.tagName} (${mainContentElement.width}px) 作為有效內容寬度`);
+            mcpLog('info', `使用最寬固定元素 ${mainContentElement.tagName} (${mainContentElement.width}px) 作為有效內容寬度`);
         }
     }
     effectiveContentWidth = Math.max(effectiveContentWidth, 320);
-    console.log(`最終有效內容寬度計算為: ${effectiveContentWidth}px`);
+    mcpLog('info', `最終有效內容寬度計算為: ${effectiveContentWidth}px`);
     
     let pageContainersData: SplitElementData[] = [];
     let selectorForSplitting = this.options.splitSelector;
@@ -339,9 +512,9 @@ export class HtmlToPngConverter {
             })
         ).catch(() => []); 
         if (pageContainersData.length > 0) {
-            console.log(`找到 ${pageContainersData.length} 個元素用於分割 (選擇器: "${selectorForSplitting}")`);
+            mcpLog('info', `找到 ${pageContainersData.length} 個元素用於分割 (選擇器: "${selectorForSplitting}")`);
         } else {
-            console.log(`選擇器 "${selectorForSplitting}" 未找到任何元素，將執行單張截圖。`);
+            mcpLog('info', `選擇器 "${selectorForSplitting}" 未找到任何元素，將執行單張截圖。`);
         }
     }
     
@@ -362,7 +535,7 @@ export class HtmlToPngConverter {
     }
     finalViewportHeight = Math.max(finalViewportHeight, 600);
     
-    console.log(`設置最終截圖視口: width=${Math.floor(finalViewportWidth)}, height=${Math.floor(finalViewportHeight)}`);
+    mcpLog('info', `設置最終截圖視口: width=${Math.floor(finalViewportWidth)}, height=${Math.floor(finalViewportHeight)}`);
     await page.setViewport({
         width: Math.floor(finalViewportWidth),
         height: Math.floor(finalViewportHeight),

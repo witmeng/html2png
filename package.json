@@ -1,6 +1,6 @@
 {
   "name": "html2png-mcp",
-  "version": "2.0.43",
+  "version": "2.0.59",
   "description": "MCP server for HTML to PNG conversion using Puppeteer.",
   "type": "module",
   "main": "dist/html-to-png.js",
@@ -20,7 +20,8 @@
     "@modelcontextprotocol/sdk": "^1.12.0",
     "puppeteer": "^24.9.0",
     "express": "^4.18.0",
-    "multer": "^1.4.5-lts.1"
+    "multer": "^1.4.5-lts.1",
+    "ali-oss": "^6.18.1"
   },
   "devDependencies": {
     "@types/node": "^20.0.0",

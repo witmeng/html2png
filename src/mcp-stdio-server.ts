@@ -49,42 +49,10 @@ import { HtmlToPngConverter, type ConverterOptions as HtmlToPngConverterOptions 
 import path from 'path';
 import fs from 'fs/promises';
 import crypto from 'crypto';
+import { logToFile, logToFileSync, mcpLog } from './log.js';
 
-// 將日誌輸出到文件而不是標準輸出，避免干擾 MCP 協議
-const logToFile = async (message: string) => {
-  try {
-    const logDir = path.resolve(process.cwd(), 'mcp_logs');
-    await fs.mkdir(logDir, { recursive: true });
-    const logFile = path.join(logDir, `mcp-server-${new Date().toISOString().slice(0, 10)}.log`);
-    await fs.appendFile(logFile, `${new Date().toISOString()} - ${message}\n`);
-  } catch (e) {
-    // 避免在日誌操作失敗時拋出錯誤
-  }
-};
-
-console.log = (...args: any[]) => {
-  const message = args.map(arg => 
-    typeof arg === 'object' ? JSON.stringify(arg) : String(arg)
-  ).join(' ');
-  logToFile(`INFO: ${message}`);
-};
-
-console.error = (...args: any[]) => {
-  const message = args.map(arg => 
-    typeof arg === 'object' ? JSON.stringify(arg) : String(arg)
-  ).join(' ');
-  logToFile(`ERROR: ${message}`);
-};
-
-console.warn = (...args: any[]) => {
-  const message = args.map(arg => 
-    typeof arg === 'object' ? JSON.stringify(arg) : String(arg)
-  ).join(' ');
-  logToFile(`WARN: ${message}`);
-};
-
-// 在初始化日誌後寫入一條啟動信息
-logToFile("MCP Stdio Server for html2png starting...");
+// 啟動時同步寫入一條日誌
+logToFileSync('MCP Stdio Server for html2png starting (sync log)...');
 
 // 1. Define Server Information
 const serverInfo = ImplementationSchema.parse({
@@ -117,6 +85,7 @@ type ConvertInput = z.infer<typeof ConvertInputSchema>;
 const ConvertOutputSchema = z.object({
   outputPaths: z.array(z.string()).describe("所有生成的 PNG 路徑"),
   fileNames: z.array(z.string()).describe("所有生成的檔名"),
+  ossUrls: z.array(z.string()).describe("所有上傳到 OSS 的圖片網址"),
   logs: z.array(z.string()).optional().describe("轉換日誌"),
 }).strict();
 
@@ -188,6 +157,7 @@ const convertToolCallback: ToolCallback<typeof ConvertInputSchema.shape> = async
         const urls = input.split(';').map(u => u.trim()).filter(Boolean);
         var outputPaths: string[] = [];
         var fileNames: string[] = [];
+        var ossUrls: string[] = [];
         for (let i = 0; i < urls.length; i++) {
           const url = urls[i];
           const fileName = urls.length === 1
@@ -195,51 +165,57 @@ const convertToolCallback: ToolCallback<typeof ConvertInputSchema.shape> = async
             : `${path.basename(actualOutputFileName, '.png')}_${i + 1}.png`;
           const outPath = path.join(outputBaseDir, fileName);
           logs.push(`Converting URL: ${url}`);
-          await converter.convertUrl(url, outPath);
-          outputPaths.push(outPath);
-          fileNames.push(fileName);
+          const { localPaths, ossUrls: singleOssUrls } = await converter.convertUrl(url, outPath);
+          outputPaths.push(...localPaths);
+          fileNames.push(...localPaths.map(p => path.basename(p)));
+          ossUrls.push(...singleOssUrls);
         }
         sendProgress('processing_complete', `Conversion successful: ${outputPaths.join(', ')}`);
         logs.push(`Conversion successful. Output: ${outputPaths.join(', ')}`);
         return {
-          content: [{ type: 'text', text: `Conversion successful. Output: ${outputPaths.join(', ')}` }],
+          content: [{ type: 'text', text: `Conversion successful. Output: ${outputPaths.join(', ')}; OSS: ${ossUrls.join(', ')}` }],
           structuredContent: {
             outputPaths,
             fileNames,
+            ossUrls,
             logs,
           },
         };
       case 'html':
         logs.push(`Converting HTML string (length: ${input.length})`);
-        await converter.convertHtmlString(input, outputPath);
-        outputPaths = [outputPath];
-        fileNames = [actualOutputFileName];
-        sendProgress('processing_complete', `Conversion successful: ${outputPath}`);
-        logs.push(`Conversion successful. Output: ${outputPath}`);
+        const { localPaths: htmlPaths, ossUrls: htmlOssUrls } = await converter.convertHtmlString(input, outputPath);
+        outputPaths = htmlPaths;
+        fileNames = htmlPaths.map(p => path.basename(p));
+        ossUrls = htmlOssUrls;
+        sendProgress('processing_complete', `Conversion successful: ${outputPaths.join(', ')}`);
+        logs.push(`Conversion successful. Output: ${outputPaths.join(', ')}`);
         return {
-          content: [{ type: 'text', text: `Conversion successful. Output: ${outputPath}` }],
+          content: [{ type: 'text', text: `Conversion successful. Output: ${outputPaths.join(', ')}; OSS: ${ossUrls.join(', ')}` }],
           structuredContent: {
             outputPaths,
             fileNames,
+            ossUrls,
             logs,
           },
         };
       case 'base64':
         // 當 `type: 'base64'` 時，將 `input` 解碼寫入臨時檔案，再進行轉換
         const tempFilePath = path.join(outputBaseDir, `temp_${conversionJobId}.base64`);
-        await fs.writeFile(tempFilePath, input, 'utf-8');
+        await fs.writeFile(tempFilePath, input, 'base64');
         logs.push(`Converting base64 content (saved to temp: ${tempFilePath})`);
-        await converter.convertFile(tempFilePath, outputPath);
+        const { localPaths: base64Paths, ossUrls: base64OssUrls } = await converter.convertFile(tempFilePath, outputPath);
         await fs.unlink(tempFilePath).catch((e: Error) => console.error("Failed to delete temp base64 file:", e));
-        outputPaths = [outputPath];
-        fileNames = [actualOutputFileName];
-        sendProgress('processing_complete', `Conversion successful: ${outputPath}`);
-        logs.push(`Conversion successful. Output: ${outputPath}`);
+        outputPaths = base64Paths;
+        fileNames = base64Paths.map(p => path.basename(p));
+        ossUrls = base64OssUrls;
+        sendProgress('processing_complete', `Conversion successful: ${outputPaths.join(', ')}`);
+        logs.push(`Conversion successful. Output: ${outputPaths.join(', ')}`);
         return {
-          content: [{ type: 'text', text: `Conversion successful. Output: ${outputPath}` }],
+          content: [{ type: 'text', text: `Conversion successful. Output: ${outputPaths.join(', ')}; OSS: ${ossUrls.join(', ')}` }],
           structuredContent: {
             outputPaths,
             fileNames,
+            ossUrls,
             logs,
           },
         };
@@ -257,6 +233,7 @@ const convertToolCallback: ToolCallback<typeof ConvertInputSchema.shape> = async
     const errorStructuredContent = {
       outputPaths: [],
       fileNames: [],
+      ossUrls: [],
       logs,
       error: String(error),
     };
@@ -282,7 +259,7 @@ const mcpServer = new McpServer(serverInfo, {
 
 // 5. Register the tool
 mcpServer.registerTool('html2png/convert', {
-  description: 'Converts HTML, URL, or base64 file content to a PNG image.\n\n說明：\n- 當 type 為 html 時，input 必須是 HTML 原始碼字串（不能是檔案路徑）。\n- 當 type 為 base64 時，input 必須是 base64 編碼的檔案內容。\n- 當 type 為 url 時，input 為網址（可分號分隔多個網址）。',
+  description: 'Converts HTML, URL, or base64 file content to a PNG image.\n\n說明：\n- 當 type 為 html 時，input必須是HTML字符串（不能是檔案路徑）。\n- 當 type 為 base64 時，input 必須是 base64 編碼的檔案內容。\n- 當 type 為 url 時，input 為網址（可分號分隔多個網址）。',
   inputSchema: ConvertInputSchema.shape,
   outputSchema: ConvertOutputSchema.shape,
   annotations: {穩定性: '實驗性'},
